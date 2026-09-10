@@ -85,13 +85,28 @@ admin key in the deployed SGLang version. Current SGLang LLM servers expose
 export MODEL_SERVING_API_KEY='replace-with-the-user-key'
 export MODEL_SERVING_ADMIN_API_KEY='replace-with-the-admin-key'
 export MODEL_SERVING_ADMIN_PATH='/hicache/storage-backend'
+export MODEL_SERVING_ADMIN_METHOD='GET'
 
 model-serving-smoke-tests --base-url http://127.0.0.1:30000
 ```
 
 The three expected results are anonymous denied, user key denied, and admin key
-accepted. The tool sends only `GET`; never configure a state-changing GET endpoint.
-Both admin variables are required together so a typo cannot silently skip the test.
+accepted. `MODEL_SERVING_ADMIN_METHOD` may be `GET` or `POST`; POST probes always send
+an empty JSON object and cannot carry an operator-supplied management payload. Never
+configure an endpoint where an empty object changes server state. Both admin key/path
+variables are required together so a typo cannot silently skip the test.
+
+For the MiniMax-H3 authentication branch, use its read-only tensor-checker route. The
+probe sends `{}` deliberately: the admin key reaches request validation and returns
+HTTP 400, while missing/user keys return 401 or 403. No weight operation is started:
+
+```bash
+export MODEL_SERVING_ADMIN_PATH='/update_weights_from_tensor_checker'
+export MODEL_SERVING_ADMIN_METHOD='POST'
+
+model-serving-smoke-tests \
+  --base-url http://127.0.0.1:30010
+```
 
 SGLang's authentication behavior and vLLM's authentication scope can change between
 versions. Check the deployed version against the
@@ -193,6 +208,7 @@ headers, response bodies, or key values.
     "api_key_configured": true,
     "admin_api_key_configured": false,
     "admin_path": null,
+    "admin_method": "GET",
     "inference": "none",
     "model": "served-model"
   },

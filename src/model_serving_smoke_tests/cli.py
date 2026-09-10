@@ -65,6 +65,7 @@ def main(
         api_key=api_key,
         admin_api_key=admin_api_key,
         admin_path=env.get("MODEL_SERVING_ADMIN_PATH") or None,
+        admin_method=env.get("MODEL_SERVING_ADMIN_METHOD", "GET").upper(),
         model=args.model,
         inference=args.inference,
         image_url=args.image_url,

@@ -68,6 +68,12 @@ class MockHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         type(self).last_json = json.loads(self.rfile.read(length) or b"{}")
+        if self.path == "/admin/checksum":
+            if not self._authorized(ADMIN_KEY):
+                self._send(401, {"error": "unauthorized"})
+            else:
+                self._send(400, {"error": "required fields are missing"})
+            return
         if not self._authorized(API_KEY):
             self._send(401, {"error": "unauthorized"})
         elif self.path == "/v1/chat/completions":
@@ -126,6 +132,22 @@ def test_text_inference_uses_discovered_model():
     assert report["summary"] == {"passed": 9, "failed": 0, "skipped": 0}
     assert MockHandler.last_json["model"] == "test-model"
     assert MockHandler.last_json["temperature"] == 0
+
+
+def test_admin_post_probe_uses_empty_json():
+    with mock_server() as base_url:
+        report = SmokeRunner(
+            config(
+                base_url,
+                admin_path="/admin/checksum",
+                admin_method="POST",
+            )
+        ).run()
+
+    admin = [check for check in report["checks"] if check["name"].startswith("admin")]
+    assert all(check["status"] == "passed" for check in admin)
+    assert admin[-1]["status_code"] == 400
+    assert MockHandler.last_json == {}
 
 
 def test_multimodal_inference_requires_and_sends_image_url():
@@ -221,6 +243,10 @@ def test_open_server_without_keys_treats_auth_checks_as_open():
                 "admin_path": "/admin/status?token=unsafe",
             },
             "without a query",
+        ),
+        (
+            {"base_url": "http://localhost:8000", "admin_method": "DELETE"},
+            "must be GET or POST",
         ),
         (
             {"base_url": "http://localhost:8000", "inference": "multimodal"},

@@ -24,6 +24,7 @@ class Config:
     api_key: str | None = None
     admin_api_key: str | None = None
     admin_path: str | None = None
+    admin_method: str = "GET"
     model: str | None = None
     inference: str = "none"
     image_url: str | None = None
@@ -58,6 +59,8 @@ class Config:
                     "MODEL_SERVING_ADMIN_PATH must be a path starting with '/' "
                     "without a query or fragment"
                 )
+        if self.admin_method not in {"GET", "POST"}:
+            raise ValueError("MODEL_SERVING_ADMIN_METHOD must be GET or POST")
         if self.inference not in {"none", "text", "multimodal", "minimax-h3"}:
             raise ValueError(f"unsupported inference profile: {self.inference}")
         if self.inference == "multimodal" and not self.image_url:
@@ -186,6 +189,7 @@ class SmokeRunner:
                 "api_key_configured": bool(self.config.api_key),
                 "admin_api_key_configured": bool(self.config.admin_api_key),
                 "admin_path": self.config.admin_path,
+                "admin_method": self.config.admin_method,
                 "inference": self.config.inference,
                 "model": self.config.model or self.discovered_model,
             },
@@ -297,9 +301,10 @@ class SmokeRunner:
         checks = [
             self._request_check(
                 "admin.no_key",
-                "GET",
+                self.config.admin_method,
                 self.config.admin_path,
                 key=None,
+                json_body={} if self.config.admin_method == "POST" else None,
                 expected_statuses=AUTH_FAILURE_CODES,
             )
         ]
@@ -307,9 +312,10 @@ class SmokeRunner:
             checks.append(
                 self._request_check(
                     "admin.user_key",
-                    "GET",
+                    self.config.admin_method,
                     self.config.admin_path,
                     key=self.config.api_key,
+                    json_body={} if self.config.admin_method == "POST" else None,
                     expected_statuses=AUTH_FAILURE_CODES,
                 )
             )
@@ -318,10 +324,11 @@ class SmokeRunner:
         checks.append(
             self._request_check(
                 "admin.correct_key",
-                "GET",
+                self.config.admin_method,
                 self.config.admin_path,
                 key=self.config.admin_api_key,
-                expect_success=True,
+                json_body={} if self.config.admin_method == "POST" else None,
+                expect_authenticated=True,
             )
         )
         return checks
@@ -499,21 +506,32 @@ class SmokeRunner:
         path: str,
         *,
         key: str | None,
+        json_body: dict[str, Any] | None = None,
         expect_success: bool = False,
+        expect_authenticated: bool = False,
         expected_statuses: set[int] | None = None,
     ) -> CheckResult:
         started = time.monotonic()
         try:
-            response = self.client.request(method, path, key=key)
-            passed = (
-                200 <= response.status < 300
-                if expect_success
-                else response.status in (expected_statuses or set())
-            )
-            if passed:
+            response = self.client.request(method, path, key=key, json_body=json_body)
+            if expect_authenticated:
+                passed = (
+                    response.status < 500
+                    and response.status not in AUTH_FAILURE_CODES
+                    and response.status not in {404, 405}
+                )
+            elif expect_success:
+                passed = 200 <= response.status < 300
+            else:
+                passed = response.status in (expected_statuses or set())
+            if passed and expect_authenticated:
+                message = "admin authentication was accepted"
+            elif passed:
                 message = (
                     "request succeeded" if expect_success else "request was rejected"
                 )
+            elif expect_authenticated:
+                message = "admin authentication was rejected or route is unavailable"
             elif expect_success:
                 message = "expected a successful response"
             else:
