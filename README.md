@@ -1,250 +1,104 @@
 # model-serving-smoke-tests
 
-Small, dependency-free runtime checks for SGLang, vLLM, and other
-OpenAI-compatible model servers.
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-The first release checks:
+Check a running model service after deployment or an image upgrade. Verify HTTP
+health, model discovery, API-key behavior, and optional inference; save the results
+as JSON for deployment scripts and handoffs.
 
-- `GET /health`
-- `GET /v1/models` with no key, a generated wrong key, and the correct key
-- an optional read-only admin endpoint with no key, the user key, and the admin key
-- CORS `OPTIONS /v1/models`
-- optional text, image-and-text, or MiniMax-H3 inference
-- a JSON report and stable process exit codes
+**After setup, one command runs the checks.** The service must already be running,
+and its credentials must be loaded into your environment.
 
-Real inference is off by default. The normal smoke test is lightweight and does not
-require a GPU on the client machine.
+## 1. Prepare once
 
-## Requirements
+Requires Python 3.10+ and a reachable model service. The client uses the Python
+standard library and runs on a CPU machine.
 
-- Python 3.10 or newer
-- a reachable HTTP service
-- NVIDIA GPUs only on the model-server side when the selected model requires them
-
-The installed CLI has no third-party runtime dependencies.
-
-## Install
+Linux / Bash:
 
 ```bash
 git clone https://github.com/qwe962/model-serving-smoke-tests.git
 cd model-serving-smoke-tests
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -e .
 ```
 
-PowerShell activation:
+An existing checkout is ready to use from its project directory.
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -e .
-```
-
-## Quick start
-
-An unauthenticated local server:
+For a service with API-key authentication, enter the service's existing normal key
+in each new shell session:
 
 ```bash
-model-serving-smoke-tests \
-  --base-url http://127.0.0.1:8000 \
-  --report smoke-report.json
+read -r -s -p "Normal API key: " MODEL_SERVING_API_KEY
+printf '\n'
+export MODEL_SERVING_API_KEY
 ```
 
-An authenticated server:
+For an open service, leave `MODEL_SERVING_API_KEY` unset. For a reused shell, see
+[authentication setup](docs/usage.md#authentication--鉴权配置).
+
+## 2. Run the checks
+
+From the project directory, replace the address with your running service:
 
 ```bash
-export MODEL_SERVING_API_KEY='replace-with-the-real-service-key'
-
-model-serving-smoke-tests \
-  --base-url http://127.0.0.1:8000 \
-  --report smoke-report.json
+PYTHONPATH=src python3 -m model_serving_smoke_tests --base-url http://127.0.0.1:8000 --report smoke-report.json
 ```
 
-`MODEL_SERVING_API_KEY` is intentionally not available as a command-line option.
-This keeps keys out of shell history and process listings. The CLI does not read
-`.env` files; load them with your shell or secret manager.
+This checks `/health`, `/v1/models`, and CORS. With a normal key configured, it
+expects missing/wrong keys to receive 401/403 and the configured key to succeed.
+Real inference and Admin probes are optional.
 
-For PowerShell:
+To include one real inference request, choose the matching command:
 
-```powershell
-$env:MODEL_SERVING_API_KEY = 'replace-with-the-real-service-key'
-model-serving-smoke-tests --base-url http://127.0.0.1:8000 --report smoke-report.json
+| Service | Command from the project directory |
+| --- | --- |
+| Text / chat | `PYTHONPATH=src python3 -m model_serving_smoke_tests --base-url http://127.0.0.1:8000 --inference text --report text-report.json` |
+| MiniMax-H3 on SGLang | `PYTHONPATH=src python3 -m model_serving_smoke_tests --base-url http://127.0.0.1:30011 --inference minimax-h3 --inference-timeout 7200 --report h20-report.json` |
+
+Text inference uses the first model returned by `/v1/models`; `--model` overrides
+it. MiniMax-H3 submits a four-second T2VA job and polls until `completed`. Real
+inference consumes server resources; H3 generation can take a long time.
+
+## 3. Read the result
+
+Example summary for an open service with inference and Admin probes disabled:
+
+```text
+Summary: 4 passed, 0 failed, 5 skipped
+Report: smoke-report.json
 ```
 
-## SGLang admin-key check
-
-SGLang supports a separate admin API key. vLLM does not expose the same unified
-admin-key contract, so leave these variables unset for vLLM.
-
-Set both variables and choose a read-only `GET` endpoint that is protected by the
-admin key in the deployed SGLang version. Current SGLang LLM servers expose
-`/hicache/storage-backend` as a read-only admin endpoint when HiCache is available:
-
-```bash
-export MODEL_SERVING_API_KEY='replace-with-the-user-key'
-export MODEL_SERVING_ADMIN_API_KEY='replace-with-the-admin-key'
-export MODEL_SERVING_ADMIN_PATH='/hicache/storage-backend'
-export MODEL_SERVING_ADMIN_METHOD='GET'
-
-model-serving-smoke-tests --base-url http://127.0.0.1:30000
-```
-
-The three expected results are anonymous denied, user key denied, and admin key
-accepted. `MODEL_SERVING_ADMIN_METHOD` may be `GET` or `POST`; POST probes always send
-an empty JSON object and cannot carry an operator-supplied management payload. Never
-configure an endpoint where an empty object changes server state. Both admin key/path
-variables are required together so a typo cannot silently skip the test.
-
-For the MiniMax-H3 authentication branch, use its read-only tensor-checker route. The
-probe sends `{}` deliberately: the admin key reaches request validation and returns
-HTTP 400, while missing/user keys return 401 or 403. No weight operation is started:
-
-```bash
-export MODEL_SERVING_ADMIN_PATH='/update_weights_from_tensor_checker'
-export MODEL_SERVING_ADMIN_METHOD='POST'
-
-model-serving-smoke-tests \
-  --base-url http://127.0.0.1:30010
-```
-
-SGLang's authentication behavior and vLLM's authentication scope can change between
-versions. Check the deployed version against the
-[SGLang server arguments](https://github.com/sgl-project/sglang/blob/main/docs_new/docs/advanced_features/server_arguments.mdx)
-and [vLLM security documentation](https://github.com/vllm-project/vllm/blob/main/docs/usage/security.md).
-
-## Optional inference
-
-### Text
-
-The model is discovered from the first `/v1/models` entry unless `--model` is set.
-
-```bash
-export MODEL_SERVING_API_KEY='replace-with-the-real-service-key'
-
-model-serving-smoke-tests \
-  --base-url http://127.0.0.1:8000 \
-  --model Qwen/Qwen2.5-1.5B-Instruct \
-  --inference text \
-  --inference-timeout 120 \
-  --report text-report.json
-```
-
-### Multimodal chat
-
-The image URL must be reachable by the model server. Restrict allowed media domains
-on internet-facing services.
-
-```bash
-export MODEL_SERVING_API_KEY='replace-with-the-real-service-key'
-
-model-serving-smoke-tests \
-  --base-url http://127.0.0.1:8000 \
-  --model your-vision-model \
-  --inference multimodal \
-  --image-url https://example.com/test-image.png \
-  --inference-timeout 300 \
-  --report multimodal-report.json
-```
-
-### MiniMax-H3
-
-The MiniMax-H3 profile submits a four-second T2VA job to `POST /v1/videos`, polls
-`GET /v1/videos/{id}`, and passes only after the job reaches `completed`. It does not
-download the generated MP4. This is a real, potentially long-running GPU test and is
-never run by default or by unit-test CI.
-
-```bash
-export MODEL_SERVING_API_KEY='replace-with-the-real-service-key'
-
-model-serving-smoke-tests \
-  --base-url http://127.0.0.1:30010 \
-  --model MiniMaxAI/MiniMax-H3 \
-  --inference minimax-h3 \
-  --inference-timeout 1800 \
-  --poll-interval 2 \
-  --report minimax-h3-report.json
-```
-
-The request follows SGLang's documented asynchronous
-[MiniMax-H3 `/v1/videos` API](https://github.com/sgl-project/sglang/blob/main/docs/cookbook/diffusion/MiniMax/MiniMax-H3.mdx).
-
-## Docker
-
-Build the client image:
-
-```bash
-docker build -t model-serving-smoke-tests:local .
-```
-
-Run it on a Linux host against a service bound on the host. `-e NAME` passes the
-existing environment variable without putting its value in the Docker command:
-
-```bash
-mkdir -p reports
-export MODEL_SERVING_API_KEY='replace-with-the-real-service-key'
-
-docker run --rm --network host \
-  -e MODEL_SERVING_API_KEY \
-  -v "$PWD/reports:/reports" \
-  model-serving-smoke-tests:local \
-  --base-url http://127.0.0.1:8000 \
-  --report /reports/smoke-report.json
-```
-
-On Docker Desktop, use `http://host.docker.internal:8000` and omit
-`--network host`.
-
-## Report and exit codes
-
-The report contains status codes and short diagnostic messages, but never request
-headers, response bodies, or key values.
-
-```json
-{
-  "schema_version": 1,
-  "target": "http://127.0.0.1:8000",
-  "configuration": {
-    "api_key_configured": true,
-    "admin_api_key_configured": false,
-    "admin_path": null,
-    "admin_method": "GET",
-    "inference": "none",
-    "model": "served-model"
-  },
-  "summary": {"passed": 4, "failed": 0, "skipped": 5},
-  "checks": []
-}
-```
+This is illustrative output. Your run reports each check's status, HTTP code, and
+duration. `SKIPPED` means an optional check was disabled. Reports are written in the
+current directory; a custom report directory must already exist.
 
 | Exit code | Meaning |
 | --- | --- |
-| `0` | Every enabled check passed; skipped optional checks are allowed. |
-| `1` | One or more enabled checks failed. |
-| `2` | Invalid configuration or the JSON report could not be written. |
+| `0` | Every enabled check passed. Optional checks may be skipped. |
+| `1` | At least one enabled check failed. Inspect that check's message. |
+| `2` | Configuration error or report-writing failure. |
 
-## Development
+If the correct key gets 401/403, check the service address and loaded credential.
+If an anonymous request succeeds while a key is configured, check the server's
+authentication settings. See [failure diagnosis](docs/usage.md#diagnosis--结果排查).
 
-```bash
-python -m pip install -e '.[dev]'
-ruff check .
-ruff format --check .
-pytest
-```
+## Scope and more options
 
-GitHub Actions runs the same checks on Python 3.10, 3.11, and 3.12. It uses the local
-mock server only; no model, GPU, API key, or external service is required.
+Designed for SGLang, vLLM, and services exposing the tested HTTP endpoints.
+Compatibility depends on the deployed routes, authentication policy, and CORS
+configuration. A service exposing only part of the OpenAI API may fail the health
+or CORS checks.
 
-## Security
+Coverage is HTTP deployment acceptance. MiniMax-H3 success means job completion;
+media-file inspection is a separate acceptance step. Checks run against your
+existing server configuration and source version.
 
-- Pass user and admin keys only through `MODEL_SERVING_API_KEY` and
-  `MODEL_SERVING_ADMIN_API_KEY`.
-- `.env`, reports, build outputs, and Python caches are ignored by Git.
-- Generated wrong keys and configured keys are redacted from diagnostics.
-- The JSON report records only whether a key was configured.
-- Do not expose model servers directly to untrusted networks. Network controls are
-  still required, especially for non-OpenAI management endpoints.
+[Usage guide](docs/usage.md): Windows, installed CLI, Admin keys, multimodal input,
+Docker, report handling, and development.
+
+Keys are supplied through environment variables. Configured keys are redacted from
+diagnostics. Keep real keys in your runtime environment or secret manager; review
+reports before sharing them.
 
 ## License
 
-MIT
+[MIT](LICENSE)
